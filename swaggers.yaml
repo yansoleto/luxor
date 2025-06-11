@@ -1,0 +1,125 @@
+openapi: 3.0.3
+info:
+  title: SDN Network Provisioning API
+  description: REST API for managing tenant VXLAN networks and endpoints
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local PoC server
+
+paths:
+  /tenants/{tenant_id}/networks:
+    post:
+      summary: Create a new network for a tenant
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema:
+            type: string
+          description: Tenant identifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  example: web-tier
+      responses:
+        '201':
+          description: Network created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '400':
+          description: Invalid input
+
+  /tenants/{tenant_id}/networks/{network_id}/endpoints:
+    post:
+      summary: Add an endpoint to a tenant network
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: network_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - mac
+                - interface
+                - remote_vtep
+              properties:
+                mac:
+                  type: string
+                  example: "02:42:c0:a8:00:01"
+                interface:
+                  type: string
+                  example: eth0
+                remote_vtep:
+                  type: string
+                  format: ipv4
+                  example: "192.0.2.1"
+      responses:
+        '201':
+          description: Endpoint added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endpoint'
+        '404':
+          description: Network not found
+        '400':
+          description: Invalid input
+
+  /tenants/{tenant_id}/networks/{network_id}:
+    get:
+      summary: Get details of a specific network
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: network_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Network details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '404':
+          description: Network not found
+
+components:
+  schemas:
+    Network:
+      type: object
+      properties:
+        id:
+          type: string
+          example: net-00010
+        tenant_id:
+          type: string
+          example: tenant
