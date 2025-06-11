@@ -1,0 +1,261 @@
+// minimal C REST API
+ In-memory "DB" of networks
+ JSON handling with jansson
+ HTTP server with libmicrohttpd
+
+// libmicrohttpd → lightweight HTTP server library for C
+ //jansson → JSON parsing and generation in C
+
+
+
+ minimal C REST API
+ In-memory "DB" of networks
+ JSON handling with jansson
+ HTTP server with libmicrohttpd
+ 
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <microhttpd.h>
+#include <jansson.h>
+
+//TENANT 
+
+#define MAX_TENANTS 10 
+#define MAX_NETWORKS 50
+#define MAX_ENDPOINTS 100
+
+typedef struct {
+    char mac[32];
+    char interface[32];
+    char remote_vtep_ip[64];
+} Endpoint;
+
+typedef struct {
+    char id[64]; // network ID
+    int vni;
+    char tenant_id[64];
+    Endpoint endpoints[MAX_ENDPOINTS];
+    int endpoint_count;
+} Network;
+
+typedef struct {
+    char id[64]; // tenant ID
+    Network networks[MAX_NETWORKS];
+    int network_count;
+} Tenant;
+
+Tenant tenants[MAX_TENANTS];
+int tenant_count = 0;
+int vni_base = 5000;
+
+// JSON response
+int send_json_response(struct MHD_Connection *connection, const char *json, int status_code) {
+    struct MHD_Response *response = MHD_create_response_from_buffer(strlen(json), (void *)json, MHD_RESPMEM_MUST_COPY);
+    MHD_add_response_header(response, "Content-Type", "application/json");
+    int ret = MHD_queue_response(connection, status_code, response);
+    MHD_destroy_response(response);
+    return ret;
+}
+
+// look or create tenant ?
+Tenant* get_or_create_tenant(const char* tenant_id) {
+    for (int i = 0; i < tenant_count; ++i) {
+        if (strcmp(tenants[i].id, tenant_id) == 0) {
+            return &tenants[i];
+        }
+    }
+    if (tenant_count >= MAX_TENANTS) return NULL;
+    strncpy(tenants[tenant_count].id, tenant_id, sizeof(tenants[tenant_count].id));
+    tenants[tenant_count].network_count = 0;
+    return &tenants[tenant_count++];
+}
+
+//find by network id
+Network* get_network(const char* tenant_id, const char* network_id) {
+    for (int i = 0; i < tenant_count; ++i) {
+        if (strcmp(tenants[i].id, tenant_id) == 0) {
+            Tenant *tenant = &tenants[i];
+            for (int j = 0; j < tenant->network_count; ++j) {
+                if (strcmp(tenant->networks[j].id, network_id) == 0) {
+                    return &tenant->networks[j];
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+// POST /tenants/{tenant_id}/networks
+int handle_post_network(struct MHD_Connection *connection, const char *tenant_id, const char *post_data) {
+    json_error_t error;
+    json_t *root = json_loads(post_data, 0, &error);
+    if (!root) return send_json_response(connection, "{\"error\": \"Invalid JSON\"}", MHD_HTTP_BAD_REQUEST);
+
+    const char *network_id = json_string_value(json_object_get(root, "network_id"));
+    if (!network_id) {
+        json_decref(root);
+        return send_json_response(connection, "{\"error\": \"Missing network_id\"}", MHD_HTTP_BAD_REQUEST);
+    }
+
+    Tenant *tenant = get_or_create_tenant(tenant_id);
+    if (!tenant) {
+        json_decref(root);
+        return send_json_response(connection, "{\"error\": \"Too many tenants\"}", MHD_HTTP_CONFLICT);
+    }
+
+    if (tenant->network_count >= MAX_NETWORKS) {
+        json_decref(root);
+        return send_json_response(connection, "{\"error\": \"Max networks reached\"}", MHD_HTTP_CONFLICT);
+    }
+
+    Network *net = &tenant->networks[tenant->network_count++];
+    strncpy(net->id, network_id, sizeof(net->id));
+    strncpy(net->tenant_id, tenant_id, sizeof(net->tenant_id));
+    net->vni = vni_base++;
+    net->endpoint_count = 0;
+
+    printf(">>>  run: ip link add vxlan%d type vxlan id %d dev eth0 dstport 4789\n", net->vni, net->vni);
+    printf(">>>  run: ip link set vxlan%d up\n", net->vni);
+    printf(">>>  run: bridge link add dev vxlan%d master br-%s\n", net->vni, net->id);
+
+    json_t *resp = json_object();
+    json_object_set_new(resp, "network_id", json_string(net->id));
+    json_object_set_new(resp, "vni", json_integer(net->vni));
+    json_object_set_new(resp, "tenant_id", json_string(net->tenant_id));
+    char *out = json_dumps(resp, 0);
+    int ret = send_json_response(connection, out, MHD_HTTP_CREATED);
+    free(out);
+    json_decref(resp);
+    json_decref(root);
+    return ret;
+}
+
+// POST /tenants/{tenant_id}/networks/{network_id}/endpoints
+int handle_post_endpoint(struct MHD_Connection *connection, const char *tenant_id, const char *network_id, const char *post_data) {
+    Network *net = get_network(tenant_id, network_id);
+    if (!net) return send_json_response(connection, "{\"error\": \"Network not found\"}", MHD_HTTP_NOT_FOUND);
+
+    if (net->endpoint_count >= MAX_ENDPOINTS) {
+        return send_json_response(connection, "{\"error\": \"Max endpoints reached\"}", MHD_HTTP_CONFLICT);
+    }
+
+    json_error_t error;
+    json_t *root = json_loads(post_data, 0, &error);
+    if (!root) return send_json_response(connection, "{\"error\": \"Invalid JSON\"}", MHD_HTTP_BAD_REQUEST);
+
+    const char *mac = json_string_value(json_object_get(root, "mac"));
+    const char *iface = json_string_value(json_object_get(root, "interface"));
+    const char *vtep_ip = json_string_value(json_object_get(root, "remote_vtep_ip"));
+
+    if (!mac || !iface || !vtep_ip) {
+        json_decref(root);
+        return send_json_response(connection, "{\"error\": \"Missing fields\"}", MHD_HTTP_BAD_REQUEST);
+    }
+
+    Endpoint *ep = &net->endpoints[net->endpoint_count++];
+    strncpy(ep->mac, mac, sizeof(ep->mac));
+    strncpy(ep->interface, iface, sizeof(ep->interface));
+    strncpy(ep->remote_vtep_ip, vtep_ip, sizeof(ep->remote_vtep_ip));
+
+    printf(">>> Would run: bridge fdb add %s dev vxlan%d dst %s\n", ep->mac, net->vni, ep->remote_vtep_ip);
+    printf(">>> Would run: ip link set %s master br-%s\n", ep->interface, net->id);
+
+    json_t *resp = json_object();
+    json_object_set_new(resp, "mac", json_string(ep->mac));
+    json_object_set_new(resp, "interface", json_string(ep->interface));
+    json_object_set_new(resp, "remote_vtep_ip", json_string(ep->remote_vtep_ip));
+    char *out = json_dumps(resp, 0);
+    int ret = send_json_response(connection, out, MHD_HTTP_CREATED);
+    free(out);
+    json_decref(resp);
+    json_decref(root);
+    return ret;
+}
+
+// GET /tenants/{tenant_id}/networks/{network_id}
+int handle_get_network(struct MHD_Connection *connection, const char *tenant_id, const char *network_id) {
+    Network *net = get_network(tenant_id, network_id);
+    if (!net) return send_json_response(connection, "{\"error\": \"Network not found\"}", MHD_HTTP_NOT_FOUND);
+
+    json_t *resp = json_object();
+    json_object_set_new(resp, "network_id", json_string(net->id));
+    json_object_set_new(resp, "vni", json_integer(net->vni));
+    json_object_set_new(resp, "tenant_id", json_string(net->tenant_id));
+
+    json_t *eps = json_array();
+    for (int i = 0; i < net->endpoint_count; ++i) {
+        Endpoint *ep = &net->endpoints[i];
+        json_t *e = json_object();
+        json_object_set_new(e, "mac", json_string(ep->mac));
+        json_object_set_new(e, "interface", json_string(ep->interface));
+        json_object_set_new(e, "remote_vtep_ip", json_string(ep->remote_vtep_ip));
+        json_array_append_new(eps, e);
+    }
+    json_object_set_new(resp, "endpoints", eps);
+
+    char *out = json_dumps(resp, 0);
+    int ret = send_json_response(connection, out, MHD_HTTP_OK);
+    free(out);
+    json_decref(resp);
+    return ret;
+}
+
+
+static int answer_to_connection(void *cls,
+                                struct MHD_Connection *connection,
+                                const char *url,
+                                const char *method,
+                                const char *version,
+                                const char *upload_data,
+                                size_t *upload_data_size,
+                                void **con_cls) {
+    static char *post_data = NULL;
+
+    if (strcmp(method, "POST") == 0) {
+        if (*upload_data_size != 0) {
+            post_data = strndup(upload_data, *upload_data_size);
+            *upload_data_size = 0;
+            return MHD_YES;
+        }
+
+        char tenant[64], network[64];
+        if (sscanf(url, "/tenants/%63[^/]/networks", tenant) == 1 && strstr(url, "/endpoints") == NULL) {
+            return handle_post_network(connection, tenant, post_data);
+        }
+
+        if (sscanf(url, "/tenants/%63[^/]/networks/%63[^/]/endpoints", tenant, network) == 2) {
+            return handle_post_endpoint(connection, tenant, network, post_data);
+        }
+
+        return send_json_response(connection, "{\"error\": \"Unknown POST endpoint\"}", MHD_HTTP_NOT_FOUND);
+    }
+
+    if (strcmp(method, "GET") == 0) {
+        char tenant[64], network[64];
+        if (sscanf(url, "/tenants/%63[^/]/networks/%63[^/]", tenant, network) == 2) {
+            return handle_get_network(connection, tenant, network);
+        }
+        return send_json_response(connection, "{\"error\": \"Unknown GET endpoint\"}", MHD_HTTP_NOT_FOUND);
+    }
+
+    return send_json_response(connection, "{\"error\": \"Method Not Allowed\"}", MHD_HTTP_METHOD_NOT_ALLOWED);
+}
+
+int main() {
+    struct MHD_Daemon *daemon;
+
+    daemon = MHD_start_daemon(MHD_USE_AUTO, 8080, NULL, NULL,
+                              &answer_to_connection, NULL, MHD_OPTION_END);
+    if (daemon == NULL) {
+        fprintf(stderr, "Failed to start HTTP server\n");
+        return 1;
+    }
+
+    printf(">>> SDN API server running on port 8080...\n");
+    getchar(); // Wait for user input
+    MHD_stop_daemon(daemon);
+    return 0;
+}
