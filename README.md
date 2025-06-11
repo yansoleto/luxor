@@ -1,5 +1,5 @@
 # Luxor Code Interview
-# 🧪 SDN Network Provisioning API
+# SDN Network Provisioning API
 Proof-of-Concept (PoC) implementation of a RESTful API service written in **C**, designed to dynamically provision tenant networks using **VXLAN** and manage their **endpoints** on Linux.
 
 ---
